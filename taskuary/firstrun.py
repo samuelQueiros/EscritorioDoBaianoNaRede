@@ -403,31 +403,39 @@ def choose_connector(store, cid: int) -> dict:
 MAIL_ERR = 'first_run_mail_error'
 
 
-def connect_mail(store, typ: str, address: str, secret: str, host: str = '') -> dict:
-    """Gmail or any IMAP mailbox: address + password, switched on, tested, read. Microsoft 365 signs in instead (ms/signin)."""
-    out = _connect_mail(store, typ, address, secret, host)
+def connect_mail(store, typ: str, address: str, secret: str, host: str = '', oauth: dict = None) -> dict:
+    """Gmail or any IMAP mailbox: address + password, switched on, tested, read. Microsoft 365 signs in instead (ms/signin).
+    `oauth` (gmail only) is {client_id, client_secret, refresh_token} - the way in when an admin has turned App Passwords
+    off; when all three are filled, `secret` (the App Password) may be blank."""
+    out = _connect_mail(store, typ, address, secret, host, oauth)
     # EVERY ANSWER IS THE LINE'S: a missing "@" returned early, and the line kept the last address's "turned the connection away"
     # under the card's "Type your full email address" (a live walk, 2026-10-17)
     store.set_setting(MAIL_ERR, '' if out['ok'] else out['why'], 'owner')
     return out
 
 
-def _connect_mail(store, typ: str, address: str, secret: str, host: str = '') -> dict:
+def _connect_mail(store, typ: str, address: str, secret: str, host: str = '', oauth: dict = None) -> dict:
     from .channels import test_connector
     if typ not in ('gmail', 'imap'): return {'ok': False, 'why': 'Microsoft 365 signs in with its own button.'}
     c = store.get_connector_by_type(typ)
     address, secret, host = str(address or '').strip(), str(secret or '').strip(), str(host or '').strip()
+    oauth = {k: str(v or '').strip() for k, v in (oauth or {}).items()} if typ == 'gmail' else {}
+    has_oauth = typ == 'gmail' and all(oauth.get(k) for k in ('client_id', 'client_secret', 'refresh_token'))
     if not c: return {'ok': False, 'why': f'There is no {typ} card here.'}
     if '@' not in address: return {'ok': False, 'why': 'Type your full email address, like you@example.com.'}
-    if not secret: return {'ok': False, 'why': 'Paste the password' + (' - for Gmail, the 16-letter App Password.' if typ == 'gmail' else '.')}
+    if not secret and not has_oauth:
+        return {'ok': False, 'why': 'Paste the password' + (' - for Gmail, the 16-letter App Password (or fill in all three Google OAuth fields instead).' if typ == 'gmail' else '.')}
     try: conf = json.loads(store.get_connector(c['ConnectorId']).get('ConfigJson') or '{}')
     except ValueError: conf = {}
     conf['address'] = address
+    if has_oauth: conf['google_client_id'], conf['google_client_secret'], conf['google_refresh_token'] = \
+        oauth['client_id'], oauth['client_secret'], oauth['refresh_token']
     # the server as IT gives it, "mail.northwind.example:993" - first run has one box for it, no port field
     if typ == 'imap' and (m := re.fullmatch(r'(.+?):(\d{2,5})', host)): host, conf['imap_port'] = m.group(1), int(m.group(2))
     if typ == 'imap': conf['imap_host'] = host or f"imap.{address.split('@', 1)[1]}"
-    store.save_connector({'ConnectorId': c['ConnectorId'], 'ConfigJson': json.dumps(conf), 'Secret': secret.replace(' ', '') if typ == 'gmail' else secret,
-                          'Active': 1}, 'owner')
+    save = {'ConnectorId': c['ConnectorId'], 'ConfigJson': json.dumps(conf), 'Active': 1}
+    if secret: save['Secret'] = secret.replace(' ', '') if typ == 'gmail' else secret
+    store.save_connector(save, 'owner')
     out = test_connector(store, c['ConnectorId'])
     if not out.get('ok'):
         store.save_connector({'ConnectorId': c['ConnectorId'], 'Active': 0}, 'owner')

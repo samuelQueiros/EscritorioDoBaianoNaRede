@@ -7,9 +7,14 @@ all take IMAP with a password or app password. Two catalog cards (`gmail` pre-fi
 the same triage, with the same attachment pipeline, and replies go back over SMTP in-thread
 (In-Reply-To/References), from the same address the mail arrived at.
 
+A Gmail/Workspace mailbox whose admin blocks App Passwords can sign in instead with the same
+google_client_id/google_client_secret/google_refresh_token fields the card already carries for
+the calendar - XOAUTH2, minted with the https://mail.google.com/ scope, in place of a password.
+
 Stdlib only (imaplib, smtplib, email) - nothing new frozen into the exe.
 """
 import base64, contextlib, email, email.utils, hashlib, imaplib, json, re, smtplib, socket, ssl
+import urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timedelta
 from email.header import decode_header, make_header
 from email.mime.text import MIMEText
@@ -135,14 +140,38 @@ def _hosts(c) -> tuple:
     return imap_h, smtp_h, cfg
 
 
+def _google_token(cfg) -> str:
+    """The access token an already-granted refresh token buys, for XOAUTH2 - the way in when an
+    admin has turned off App Passwords but still lets the account's own OAuth client sign in
+    (the same consent a desktop mail client like Thunderbird already uses). None when the three
+    card fields (shared with the calendar) are not all filled; that is not an error here, the
+    caller falls back to the password."""
+    cid, sec, rt = cfg.get('google_client_id'), cfg.get('google_client_secret'), cfg.get('google_refresh_token')
+    if not (cid and sec and rt): return None
+    data = urllib.parse.urlencode({'client_id': cid, 'client_secret': sec, 'refresh_token': rt,
+                                    'grant_type': 'refresh_token'}).encode()
+    req = urllib.request.Request('https://oauth2.googleapis.com/token', data=data, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r: return json.loads(r.read())['access_token']
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f'Google token refresh failed ({e.code}): {e.read()[:200].decode(errors="replace")}') from e
+
+
+def _xoauth2(user: str, token: str) -> str:
+    return f'user={user}\x01auth=Bearer {token}\x01\x01'
+
+
 def _login(c):
     imap_h, _smtp, cfg = _hosts(c)
     if not imap_h: raise RuntimeError('no IMAP host set - e.g. imap.yourdomain.com')
     user = (cfg.get('address') or '').strip()
     if not user: raise RuntimeError('no mailbox address set')
-    if not c.get('Secret'): raise RuntimeError('no password saved - for Gmail use an App Password '
-                                               '(myaccount.google.com > Security > App passwords)')
-    if _microsoft(user, imap_h):
+    token = _google_token(cfg)
+    if not token and not c.get('Secret'):
+        raise RuntimeError('no password saved - for Gmail use an App Password '
+                           '(myaccount.google.com > Security > App passwords), or fill the Google OAuth '
+                           'client id/secret/refresh token fields to sign in instead')
+    if not token and _microsoft(user, imap_h):
         # basic auth is gone from Outlook.com (Sept 2024) and Exchange Online (2023): the
         # password would be refused after the socket opened, so say the useful thing first
         raise RuntimeError('Microsoft mailboxes (Outlook.com, Hotmail, Microsoft 365) no longer accept IMAP passwords - '
@@ -159,12 +188,17 @@ def _login(c):
                                'Taskuary from reaching the mail server; ask IT to allow it (or allow port 993)') from e
         raise
     verify_pin(M.sock, cfg, imap_h)
-    try: M.login(user, c['Secret'])
+    try:
+        if token: M.authenticate('XOAUTH2', lambda _challenge: _xoauth2(user, token).encode())
+        else: M.login(user, c['Secret'])
     except imaplib.IMAP4.abort: raise          # the connection dropped mid-login: not a password, and not the owner's to fix
     except imaplib.IMAP4.error as e:
         if not re.search(r'AUTHENTICATIONFAILED|invalid credentials|login failed|authentication failed|incorrect', str(e), re.I): raise
         # the server's own words are b'[AUTHENTICATIONFAILED] Invalid credentials (Failure)' - true, and no help
         with contextlib.suppress(Exception): M.shutdown()
+        if token:
+            raise RuntimeError('Google refused the OAuth sign-in. Check the client id/secret/refresh token on the '
+                               'card, and that the refresh token was minted with the https://mail.google.com/ scope.') from e
         raise RuntimeError('The mail server refused the password. Gmail and some others need an app password '
                            '(myaccount.google.com → Security → App passwords) rather than your normal one.') from e
     return M, user
@@ -778,6 +812,7 @@ def send_smtp(store, c, to: list, subject: str, body: str, in_reply_to: str = No
     server actually delivers to them (the header alone sends nothing - it is only text)."""
     imap_h, smtp_h, cfg = _hosts(c)
     user = (cfg.get('address') or '').strip()
+    token = _google_token(cfg)
     cc = [a for a in (cc or []) if a]
     # A reply that carries files is a multipart message; without them it stays the plain text it was.
     if attachments:
@@ -801,7 +836,8 @@ def send_smtp(store, c, to: list, subject: str, body: str, in_reply_to: str = No
         try: S.starttls(context=ssl_ctx(cfg))
         except ssl.SSLCertVerificationError as e: raise tls_error(e, smtp_h, port, True) from e
         verify_pin(S.sock, cfg, smtp_h)
-        S.login(user, c['Secret'])
+        if token: S.auth('XOAUTH2', lambda *_: _xoauth2(user, token), initial_response_ok=True)
+        else: S.login(user, c['Secret'])
         S.sendmail(user, list(to) + cc, m.as_string())
     return {'channel': 'email', 'to': to, 'cc': cc, 'mailbox': user, 'threaded': bool(in_reply_to),
             'attached': [f['name'] for f in (attachments or [])]}

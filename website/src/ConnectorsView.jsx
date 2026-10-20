@@ -207,19 +207,21 @@ const META = {
       "Ask whether every chat should come in or only some; for some, add chat ids as sources (POST {base}/api/sources{hdr}, Channel imessage). Ask if they want history: lookback_days in ConfigJson reads that many days on the first sync; blank is from now on. Turn the connector on, SETUP DONE - and tell them the first reply will make macOS ask for Automation permission, which they should allow."] },
   gmail: { group: "Messaging", channel: "email", srcLabel: "Mailbox", srcPh: "you@gmail.com",
     fields: [["mailbox address", "address"],
-      ["Google OAuth client id (optional — calendar)", "google_client_id", "", "Only for calendar access: an OAuth client from Google Cloud with the Calendar API enabled"],
-      ["Google OAuth client secret (optional — calendar)", "google_client_secret"],
-      ["Google refresh token (optional — calendar)", "google_refresh_token", "", "From the OAuth consent flow with scope calendar.readonly; with it, replies about time check this calendar too"]],
-    secretLabel: "App Password (16 characters)",
-    desc: "A Gmail or Google Workspace mailbox - IMAP in through triage, replies back over Gmail's own SMTP, in-thread. Optional OAuth fields add the calendar.",
+      ["Google OAuth client id (optional — sign in instead of a password)", "google_client_id", "", "An OAuth client from Google Cloud. Fill this with the secret and refresh token below to sign in instead of an App Password — also used for the calendar, if the refresh token covers it"],
+      ["Google OAuth client secret (optional — sign in instead of a password)", "google_client_secret"],
+      ["Google refresh token (optional — sign in instead of a password)", "google_refresh_token", "", "Mint with the https://mail.google.com/ scope (add calendar.readonly too to cover the calendar). With this filled, the App Password below can stay blank — this is the way in when an admin has turned App Passwords off"]],
+    secretLabel: "App Password (16 characters) — or leave blank if using Google OAuth below",
+    desc: "A Gmail or Google Workspace mailbox - IMAP in through triage, replies back over Gmail's own SMTP, in-thread. An App Password signs in; the OAuth fields are the alternative when an admin has turned those off.",
     howto: ["Turn on 2-Step Verification for the Google account (App Passwords require it).",
       "Create an App Password: myaccount.google.com -> Security -> App passwords -> app: Mail.",
       "Enter the mailbox address under Credentials and paste the 16-character App Password (write-only).",
       "Test logs in and adds the mailbox as a source; new mail flows in on the next sync.",
-      "Replies you approve are sent from this same address over SMTP, threaded into the conversation."],
+      "Replies you approve are sent from this same address over SMTP, threaded into the conversation.",
+      "If App Passwords are off for this account: create an OAuth client (Desktop app) in Google Cloud Console, mint a refresh token with the https://mail.google.com/ scope (OAuth 2.0 Playground: gear icon -> use your own OAuth credentials -> that scope -> Authorize -> Exchange authorization code -> copy the refresh token), and paste client id/secret/refresh token here instead — leave the App Password blank."],
     agent: ["Ask for the Gmail address and save it as address in ConfigJson.",
       "The App Password is the owner's to create (myaccount.google.com > Security > 2-Step Verification on, then App passwords > Mail). Ask them to paste the 16 characters here, save it as Secret, and never echo it back.",
-      "Test (POST {base}/api/connectors/{cid}/test{hdr}) logs in and adds the mailbox as a source. Turn the connector on, SETUP DONE. The Google calendar fields are optional and rarely wanted - skip them unless asked."] },
+      "If the account's admin has App Passwords turned off: the owner creates an OAuth client (Desktop app) in Google Cloud Console and mints a refresh token with scope https://mail.google.com/ (OAuth Playground, their own credentials). Save client id/secret/refresh token in ConfigJson as google_client_id/google_client_secret/google_refresh_token and leave Secret blank - the same fields cover the calendar too if the token's scopes include it.",
+      "Test (POST {base}/api/connectors/{cid}/test{hdr}) logs in and adds the mailbox as a source. Turn the connector on, SETUP DONE."] },
   imap: { group: "Messaging", channel: "email", srcLabel: "Mailbox", srcPh: "you@yourdomain.com",
     fields: [["mailbox address", "address"], ["IMAP host (e.g. imap.yourdomain.com)", "imap_host"],
              ["SMTP host (blank = imap host with imap->smtp)", "smtp_host"],
@@ -2100,6 +2102,9 @@ export function ChannelDetail({ conn: savedConn, sources: savedSources, reload, 
   const [test, setTest] = useState(null);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState("");
+  // the simple Gmail card: App Password is the lead field; OAuth (an admin blocking App Passwords) is a fold-away,
+  // open already when the card was saved with it (the owner, 2026-10-19: an admin-blocked account had nowhere to paste it)
+  const [gmailOAuth, setGmailOAuth] = useState(!!(parse(savedConn.ConfigJson).google_refresh_token));
 
   const mine = sources.filter((s) => s.ConnectorId === conn.ConnectorId);   // owned, never channel-shared
 
@@ -2288,14 +2293,21 @@ export function ChannelDetail({ conn: savedConn, sources: savedSources, reload, 
     if (conn.Type === "outlook") return <MsSignIn conn={conn} cfg={cfg} reload={reload} onSignedIn={onConnected} plain />;
     // an AI card asks only what it cannot run without - the model and base URL have defaults (Azure's endpoint has none)
     const keep = SIMPLE_FIELDS[conn.Type] || m.fields.map((f) => f[1]).filter((k) => !isAI || !["model", "base_url"].includes(k));
-    const ready = isAI ? !!secret.trim() : !!(cfg.address || "").trim() && !!secret.trim();
+    // Gmail's way in when an admin has turned App Passwords off: the same three fields the full card carries
+    // (shared with the calendar), folded away here since most people never need them
+    const oauthKeys = ["google_client_id", "google_client_secret", "google_refresh_token"];
+    const oauthReady = conn.Type === "gmail" && gmailOAuth && oauthKeys.every((k) => (cfg[k] || "").trim());
+    const ready = isAI ? !!secret.trim() : !!(cfg.address || "").trim() && (!!secret.trim() || oauthReady);
     const connect = async () => {
       setBusy("save"); setTest(null);
       try {
         const { data } = isAI
           ? await api.post("/api/setup/first-run/key", { type: conn.Type, key: secret, cid: conn.ConnectorId, config: cfg }, { timeout: 200000 })
           : await api.post("/api/setup/first-run/mail",
-            { type: conn.Type, address: cfg.address || "", password: secret, host: cfg.imap_host || "" }, { timeout: 90000 });
+            { type: conn.Type, address: cfg.address || "", password: secret, host: cfg.imap_host || "",
+              ...(conn.Type === "gmail" && gmailOAuth ? { oauth: { client_id: cfg.google_client_id || "",
+                client_secret: cfg.google_client_secret || "", refresh_token: cfg.google_refresh_token || "" } } : {}) },
+            { timeout: 90000 });
         setTest({ ok: data.ok, detail: data.why });
         if (data.ok) { setSecret(""); onConnected?.(); }
       } catch (e) { setTest({ ok: false, detail: `${e?.response?.data?.detail || e?.message || "That didn't work."} Press Connect to try again.` }); }
@@ -2313,6 +2325,23 @@ export function ChannelDetail({ conn: savedConn, sources: savedSources, reload, 
         ))}
         {m.secretLabel && <TextField size="small" type="password" label={m.secretLabel} value={secret} sx={{ bgcolor: "#fff" }}
           onChange={(e) => setSecret(e.target.value)} helperText={SIMPLE_HINT[conn.Type] || (isAI ? (m.howto || [])[0] : (m.howto || [])[1]) || ""} />}
+        {conn.Type === "gmail" && !gmailOAuth && (
+          <Button size="small" variant="text" onClick={() => setGmailOAuth(true)}
+            sx={{ alignSelf: "flex-start", fontSize: 12, color: DIM, px: 0.5 }}>
+            App Passwords turned off by your admin? Sign in with Google OAuth instead →
+          </Button>
+        )}
+        {conn.Type === "gmail" && gmailOAuth && (
+          <>
+            <TextField size="small" label="Google OAuth client id" value={cfg.google_client_id || ""} sx={{ bgcolor: "#fff" }}
+              onChange={(e) => setCfg({ ...cfg, google_client_id: e.target.value })} />
+            <TextField size="small" type="password" label="Google OAuth client secret" value={cfg.google_client_secret || ""} sx={{ bgcolor: "#fff" }}
+              onChange={(e) => setCfg({ ...cfg, google_client_secret: e.target.value })} />
+            <TextField size="small" type="password" label="Google refresh token" value={cfg.google_refresh_token || ""} sx={{ bgcolor: "#fff" }}
+              onChange={(e) => setCfg({ ...cfg, google_refresh_token: e.target.value })}
+              helperText="From a Google Cloud OAuth client, minted with the https://mail.google.com/ scope. With this filled, the App Password above can stay blank." />
+          </>
+        )}
         <Box><Button variant="contained" disableElevation disabled={busy === "save" || !ready} onClick={connect}>
           {busy === "save" ? <CircularProgress size={14} sx={{ color: "#fff" }} /> : "Connect"}</Button></Box>
         <TestLine test={test} mt={0} />

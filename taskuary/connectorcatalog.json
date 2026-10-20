@@ -191,7 +191,7 @@
       "title": "Gmail / Google Workspace",
       "group": "Messaging",
       "planned": false,
-      "desc": "A Gmail or Google Workspace mailbox - IMAP in through triage, replies back over Gmail's own SMTP, in-thread. Optional OAuth fields add the calendar.",
+      "desc": "A Gmail or Google Workspace mailbox - IMAP in through triage, replies back over Gmail's own SMTP, in-thread. An App Password signs in; OAuth fields are the alternative when an admin has turned those off.",
       "match": [
         "gmail / google workspace",
         "gmail",

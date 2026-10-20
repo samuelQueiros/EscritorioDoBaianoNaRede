@@ -32,7 +32,8 @@ export default function UpdateCard() {
     }
     setBusy("");
   }, []);
-  useEffect(() => { check(false); }, [check]);
+  // No automatic phone-home: this personal copy never calls the project's GitHub release API
+  // on its own. Checking stays available, but only when the owner presses "Check now".
 
   // After the swap the old process is gone for a few seconds. Poll /api/version until a NEW
   // version answers, then reload so the page runs the new bundle too.

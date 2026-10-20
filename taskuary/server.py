@@ -6271,7 +6271,7 @@ def setup_adopt_brain(body: SetupAdoptBrainBody):
 # ── first run: three questions on the assistant canvas (firstrun.py, FirstRun.jsx) ──────────────────────────────────────
 class FirstRunAiBody(BaseModel): name: str
 class FirstRunKeyBody(BaseModel): type: str; key: str; cid: int | None = None; config: dict | None = None
-class FirstRunMailBody(BaseModel): type: str; address: str; password: str; host: str = ''
+class FirstRunMailBody(BaseModel): type: str; address: str; password: str; host: str = ''; oauth: dict | None = None
 
 @app.get('/api/setup/first-run')
 def first_run_state():
@@ -6380,7 +6380,7 @@ def first_run_connector(body: FirstRunConnBody):
 def first_run_mail(body: FirstRunMailBody):
     """Gmail or any IMAP mailbox, switched on and read at once - Microsoft 365 signs in through /ms/signin instead."""
     from . import firstrun
-    out = firstrun.connect_mail(store, body.type, body.address, body.password, body.host)
+    out = firstrun.connect_mail(store, body.type, body.address, body.password, body.host, body.oauth)
     if out.get('ok'):
         from .docsync import sync_connections
         try: sync_connections(store, ACTOR)
